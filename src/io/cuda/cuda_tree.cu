@@ -4,7 +4,7 @@
  */
 
 
-#ifdef USE_CUDA_EXP
+#ifdef USE_CUDA
 
 #include <LightGBM/cuda/cuda_tree.hpp>
 
@@ -94,7 +94,7 @@ __global__ void SplitKernel(  // split information
     split_gain[new_node_index] = static_cast<float>(cuda_split_info->gain);
   } else if (thread_index == 4) {
     // save current leaf value to internal node before change
-    internal_weight[new_node_index] = leaf_weight[leaf_index];
+    internal_weight[new_node_index] = cuda_split_info->left_sum_hessians + cuda_split_info->right_sum_hessians;
     leaf_weight[leaf_index] = cuda_split_info->left_sum_hessians;
   } else if (thread_index == 5) {
     internal_value[new_node_index] = leaf_value[leaf_index];
@@ -210,7 +210,7 @@ __global__ void SplitCategoricalKernel(  // split information
     split_gain[new_node_index] = static_cast<float>(cuda_split_info->gain);
   } else if (thread_index == 4) {
     // save current leaf value to internal node before change
-    internal_weight[new_node_index] = leaf_weight[leaf_index];
+    internal_weight[new_node_index] = cuda_split_info->left_sum_hessians + cuda_split_info->right_sum_hessians;
     leaf_weight[leaf_index] = cuda_split_info->left_sum_hessians;
   } else if (thread_index == 5) {
     internal_value[new_node_index] = leaf_value[leaf_index];
@@ -456,4 +456,4 @@ void CUDATree::LaunchAddPredictionToScoreKernel(
 
 }  // namespace LightGBM
 
-#endif  // USE_CUDA_EXP
+#endif  // USE_CUDA

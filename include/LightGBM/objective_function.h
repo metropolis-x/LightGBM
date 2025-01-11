@@ -37,6 +37,17 @@ class ObjectiveFunction {
   virtual void GetGradients(const double* score,
     score_t* gradients, score_t* hessians) const = 0;
 
+    /*!
+  * \brief calculating first order derivative of loss function, used only for bagging by query in lambdarank
+  * \param score prediction score in this round
+  * \param num_sampled_queries number of in-bag queries
+  * \param sampled_query_indices indices of in-bag queries
+  * \gradients Output gradients
+  * \hessians Output hessians
+  */
+  virtual void GetGradients(const double* score, const data_size_t /*num_sampled_queries*/, const data_size_t* /*sampled_query_indices*/,
+    score_t* gradients, score_t* hessians) const { GetGradients(score, gradients, hessians); }
+
   virtual const char* GetName() const = 0;
 
   virtual bool IsConstantHessian() const { return false; }
@@ -97,14 +108,17 @@ class ObjectiveFunction {
   */
   virtual bool IsCUDAObjective() const { return false; }
 
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
   /*!
-  * \brief Get output convert function for CUDA version
+  * \brief Convert output for CUDA version
   */
-  virtual std::function<void(data_size_t, const double*, double*)> GetCUDAConvertOutputFunc() const {
-    return [] (data_size_t, const double*, double*) {};
+  virtual const double* ConvertOutputCUDA(data_size_t /*num_data*/, const double* input, double* /*output*/) const {
+    return input;
   }
-  #endif  // USE_CUDA_EXP
+
+  virtual bool NeedConvertOutputCUDA () const { return false; }
+
+  #endif  // USE_CUDA
 };
 
 }  // namespace LightGBM

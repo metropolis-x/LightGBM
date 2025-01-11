@@ -13,6 +13,7 @@
 #ifndef LIGHTGBM_C_API_H_
 #define LIGHTGBM_C_API_H_
 
+#include <LightGBM/arrow.h>
 #include <LightGBM/export.h>
 
 #ifdef __cplusplus
@@ -29,6 +30,7 @@
 typedef void* DatasetHandle;  /*!< \brief Handle of dataset. */
 typedef void* BoosterHandle;  /*!< \brief Handle of booster. */
 typedef void* FastConfigHandle; /*!< \brief Handle of FastConfig. */
+typedef void* ByteBufferHandle; /*!< \brief Handle of ByteBuffer. */
 
 #define C_API_DTYPE_FLOAT32 (0)  /*!< \brief float32 (single precision float). */
 #define C_API_DTYPE_FLOAT64 (1)  /*!< \brief float64 (double precision float). */
@@ -96,6 +98,22 @@ LIGHTGBM_C_EXPORT int LGBM_SampleIndices(int32_t num_total_row,
                                          void* out,
                                          int32_t* out_len);
 
+/*!
+ * \brief Get a ByteBuffer value at an index.
+ * \param handle Handle of byte buffer to be read
+ * \param index Index of value to return
+ * \param[out] out_val Byte value at index to return
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_ByteBufferGetAt(ByteBufferHandle handle, int32_t index, uint8_t* out_val);
+
+/*!
+ * \brief Free space for byte buffer.
+ * \param handle Handle of byte buffer to be freed
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_ByteBufferFree(ByteBufferHandle handle);
+
 /* --- start Dataset interface */
 
 /*!
@@ -153,6 +171,7 @@ LIGHTGBM_C_EXPORT int LGBM_DatasetCreateByReference(const DatasetHandle referenc
  * \param has_queries Whether the dataset has Metadata queries/groups
  * \param nclasses Number of initial score classes
  * \param nthreads Number of external threads that will use the PushRows APIs
+ * \param omp_max_threads Maximum number of OpenMP threads (-1 for default)
  * \return 0 when succeed, -1 when failure happens
  */
 LIGHTGBM_C_EXPORT int LGBM_DatasetInitStreaming(DatasetHandle dataset,
@@ -160,7 +179,25 @@ LIGHTGBM_C_EXPORT int LGBM_DatasetInitStreaming(DatasetHandle dataset,
                                                 int32_t has_init_scores,
                                                 int32_t has_queries,
                                                 int32_t nclasses,
-                                                int32_t nthreads);
+                                                int32_t nthreads,
+                                                int32_t omp_max_threads);
+
+/*!
+ * \brief Allocate the space for dataset and bucket feature bins according to serialized reference dataset.
+ * \param ref_buffer A binary representation of the dataset schema (feature groups, bins, etc.)
+ * \param ref_buffer_size The size of the reference array in bytes
+ * \param num_row Number of total rows the dataset will contain
+ * \param num_classes Number of classes (will be used only in case of multiclass and specifying initial scores)
+ * \param parameters Additional parameters
+ * \param[out] out Created dataset
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_DatasetCreateFromSerializedReference(const void* ref_buffer,
+                                                                int32_t ref_buffer_size,
+                                                                int64_t num_row,
+                                                                int32_t num_classes,
+                                                                const char* parameters,
+                                                                DatasetHandle* out);
 
 /*!
  * \brief Push data to existing dataset, if ``nrow + start_row == num_total_row``, will call ``dataset->FinishLoad``.
@@ -402,6 +439,23 @@ LIGHTGBM_C_EXPORT int LGBM_DatasetCreateFromMats(int32_t nmat,
                                                  DatasetHandle* out);
 
 /*!
+ * \brief Create dataset from Arrow.
+ * \param n_chunks The number of Arrow arrays passed to this function
+ * \param chunks Pointer to the list of Arrow arrays
+ * \param schema Pointer to the schema of all Arrow arrays
+ * \param parameters Additional parameters
+ * \param reference Used to align bin mapper with other dataset, nullptr means isn't used
+ * \param[out] out Created dataset
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_DatasetCreateFromArrow(int64_t n_chunks,
+                                                  const ArrowArray* chunks,
+                                                  const ArrowSchema* schema,
+                                                  const char* parameters,
+                                                  const DatasetHandle reference,
+                                                  DatasetHandle *out);
+
+/*!
  * \brief Create subset of a data.
  * \param handle Handle of full dataset
  * \param used_row_indices Indices used in subset
@@ -463,6 +517,17 @@ LIGHTGBM_C_EXPORT int LGBM_DatasetSaveBinary(DatasetHandle handle,
                                              const char* filename);
 
 /*!
+ * \brief Create a dataset schema representation as a binary byte array (excluding data).
+ * \param handle Handle of dataset
+ * \param[out] out The output byte array
+ * \param[out] out_len The length of the output byte array (returned for convenience)
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_DatasetSerializeReferenceToBinary(DatasetHandle handle,
+                                                             ByteBufferHandle* out,
+                                                             int32_t* out_len);
+
+/*!
  * \brief Save dataset to text file, intended for debugging use only.
  * \param handle Handle of dataset
  * \param filename The name of the file
@@ -489,6 +554,25 @@ LIGHTGBM_C_EXPORT int LGBM_DatasetSetField(DatasetHandle handle,
                                            const void* field_data,
                                            int num_element,
                                            int type);
+
+/*!
+ * \brief Set vector to a content in info.
+ * \note
+ * - \a group converts input datatype into ``int32``;
+ * - \a label and \a weight convert input datatype into ``float32``;
+ * - \a init_score converts input datatype into ``float64``.
+ * \param handle Handle of dataset
+ * \param field_name Field name, can be \a label, \a weight, \a init_score, \a group
+ * \param n_chunks The number of Arrow arrays passed to this function
+ * \param chunks Pointer to the list of Arrow arrays
+ * \param schema Pointer to the schema of all Arrow arrays
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_DatasetSetFieldFromArrow(DatasetHandle handle,
+                                                    const char* field_name,
+                                                    int64_t n_chunks,
+                                                    const ArrowArray* chunks,
+                                                    const ArrowSchema* schema);
 
 /*!
  * \brief Get info vector from dataset.
@@ -1334,6 +1418,40 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterPredictForMats(BoosterHandle handle,
                                                  double* out_result);
 
 /*!
+ * \brief Make prediction for a new dataset.
+ * \note
+ * You should pre-allocate memory for ``out_result``:
+ *   - for normal and raw score, its length is equal to ``num_class * num_data``;
+ *   - for leaf index, its length is equal to ``num_class * num_data * num_iteration``;
+ *   - for feature contributions, its length is equal to ``num_class * num_data * (num_feature + 1)``.
+ * \param handle Handle of booster
+ * \param n_chunks The number of Arrow arrays passed to this function
+ * \param chunks Pointer to the list of Arrow arrays
+ * \param schema Pointer to the schema of all Arrow arrays
+ * \param predict_type What should be predicted
+ *   - ``C_API_PREDICT_NORMAL``: normal prediction, with transform (if needed);
+ *   - ``C_API_PREDICT_RAW_SCORE``: raw score;
+ *   - ``C_API_PREDICT_LEAF_INDEX``: leaf index;
+ *   - ``C_API_PREDICT_CONTRIB``: feature contributions (SHAP values)
+ * \param start_iteration Start index of the iteration to predict
+ * \param num_iteration Number of iteration for prediction, <= 0 means no limit
+ * \param parameter Other parameters for prediction, e.g. early stopping for prediction
+ * \param[out] out_len Length of output result
+ * \param[out] out_result Pointer to array with predictions
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterPredictForArrow(BoosterHandle handle,
+                                                  int64_t n_chunks,
+                                                  const ArrowArray* chunks,
+                                                  const ArrowSchema* schema,
+                                                  int predict_type,
+                                                  int start_iteration,
+                                                  int num_iteration,
+                                                  const char* parameter,
+                                                  int64_t* out_len,
+                                                  double* out_result);
+
+/*!
  * \brief Save model into file.
  * \param handle Handle of booster
  * \param start_iteration Start index of the iteration that should be saved
@@ -1476,6 +1594,20 @@ LIGHTGBM_C_EXPORT int LGBM_NetworkInitWithFunctions(int num_machines,
                                                     int rank,
                                                     void* reduce_scatter_ext_fun,
                                                     void* allgather_ext_fun);
+
+/*!
+ * \brief Set maximum number of threads used by LightGBM routines in this process.
+ * \param num_threads maximum number of threads used by LightGBM. -1 means defaulting to omp_get_num_threads().
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_SetMaxThreads(int num_threads);
+
+/*!
+ * \brief Get current maximum number of threads used by LightGBM routines in this process.
+ * \param[out] out current maximum number of threads used by LightGBM. -1 means defaulting to omp_get_num_threads().
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_GetMaxThreads(int* out);
 
 #if !defined(__cplusplus) && (!defined(__STDC__) || (__STDC_VERSION__ < 199901L))
 /*! \brief Inline specifier no-op in C using standards before C99. */

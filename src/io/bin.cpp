@@ -160,20 +160,6 @@ namespace LightGBM {
                                                const std::vector<double>& forced_upper_bounds) {
     std::vector<double> bin_upper_bound;
 
-    // get list of distinct values
-    int left_cnt_data = 0;
-    int cnt_zero = 0;
-    int right_cnt_data = 0;
-    for (int i = 0; i < num_distinct_values; ++i) {
-      if (distinct_values[i] <= -kZeroThreshold) {
-        left_cnt_data += counts[i];
-      } else if (distinct_values[i] > kZeroThreshold) {
-        right_cnt_data += counts[i];
-      } else {
-        cnt_zero += counts[i];
-      }
-    }
-
     // get number of positive and negative distinct values
     int left_cnt = -1;
     for (int i = 0; i < num_distinct_values; ++i) {
@@ -577,7 +563,7 @@ namespace LightGBM {
     }
   }
 
-  void BinMapper::SaveBinaryToFile(const VirtualFileWriter* writer) const {
+  void BinMapper::SaveBinaryToFile(BinaryWriter* writer) const {
     writer->AlignedWrite(&num_bin_, sizeof(num_bin_));
     writer->AlignedWrite(&missing_type_, sizeof(missing_type_));
     writer->AlignedWrite(&is_trivial_, sizeof(is_trivial_));
@@ -886,7 +872,7 @@ namespace LightGBM {
     return nullptr;
   }
 
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
   template <>
   const void* MultiValDenseBin<uint8_t>::GetRowWiseData(uint8_t* bit_type,
       size_t* total_size,
@@ -1081,6 +1067,6 @@ namespace LightGBM {
     return to_return;
   }
 
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 
 }  // namespace LightGBM

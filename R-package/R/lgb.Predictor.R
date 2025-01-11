@@ -28,7 +28,7 @@ Predictor <- R6::R6Class(
 
     # Initialize will create a starter model
     initialize = function(modelfile, params = list(), fast_predict_config = list()) {
-      private$params <- lgb.params2str(params = params)
+      private$params <- .params2str(params = params)
       handle <- NULL
 
       if (is.character(modelfile)) {
@@ -46,7 +46,7 @@ Predictor <- R6::R6Class(
         handle <- modelfile
         private$need_free_handle <- FALSE
 
-      } else if (lgb.is.Booster(modelfile)) {
+      } else if (.is_Booster(modelfile)) {
 
         handle <- modelfile$get_handle()
         private$need_free_handle <- FALSE
@@ -97,8 +97,6 @@ Predictor <- R6::R6Class(
       if (is.null(start_iteration)) {
         start_iteration <- 0L
       }
-
-      num_row <- 0L
 
       # Check if data is a file name and not a matrix
       if (identical(class(data), "character") && length(data) == 1L) {
@@ -514,7 +512,7 @@ Predictor <- R6::R6Class(
         return(FALSE)
       }
 
-      if (lgb.is.null.handle(private$fast_predict_config$handle)) {
+      if (.is_null_handle(private$fast_predict_config$handle)) {
         warning(paste0("Model had fast CSR predict configuration, but it is inactive."
                        , " Try re-generating it through 'lgb.configure_fast_predict'."))
         return(FALSE)
@@ -529,8 +527,8 @@ Predictor <- R6::R6Class(
         private$fast_predict_config$rawscore == rawscore &&
         private$fast_predict_config$predleaf == predleaf &&
         private$fast_predict_config$predcontrib == predcontrib &&
-        lgb.equal.or.both.null(private$fast_predict_config$start_iteration, start_iteration) &&
-        lgb.equal.or.both.null(private$fast_predict_config$num_iteration, num_iteration)
+        .equal_or_both_null(private$fast_predict_config$start_iteration, start_iteration) &&
+        .equal_or_both_null(private$fast_predict_config$num_iteration, num_iteration)
       )
     }
   )

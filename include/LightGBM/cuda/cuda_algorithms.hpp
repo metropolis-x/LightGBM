@@ -6,14 +6,14 @@
 #ifndef LIGHTGBM_CUDA_CUDA_ALGORITHMS_HPP_
 #define LIGHTGBM_CUDA_CUDA_ALGORITHMS_HPP_
 
-#ifdef USE_CUDA_EXP
+#ifdef USE_CUDA
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
 
 #include <LightGBM/bin.h>
-#include <LightGBM/cuda/cuda_utils.h>
+#include <LightGBM/cuda/cuda_utils.hu>
 #include <LightGBM/utils/log.h>
 
 #include <algorithm>
@@ -115,7 +115,7 @@ __device__ __forceinline__ T ShuffleReduceSumWarp(T value, const data_size_t len
   return value;
 }
 
-// reduce values from an 1-dimensional block (block size must be no greather than 1024)
+// reduce values from an 1-dimensional block (block size must be no greater than 1024)
 template <typename T>
 __device__ __forceinline__ T ShuffleReduceSum(T value, T* shared_mem_buffer, const size_t len) {
   const uint32_t warpLane = threadIdx.x % warpSize;
@@ -145,7 +145,7 @@ __device__ __forceinline__ T ShuffleReduceMaxWarp(T value, const data_size_t len
   return value;
 }
 
-// reduce values from an 1-dimensional block (block size must be no greather than 1024)
+// reduce values from an 1-dimensional block (block size must be no greater than 1024)
 template <typename T>
 __device__ __forceinline__ T ShuffleReduceMax(T value, T* shared_mem_buffer, const size_t len) {
   const uint32_t warpLane = threadIdx.x % warpSize;
@@ -183,6 +183,40 @@ __device__ __forceinline__ void GlobalMemoryPrefixSum(T* array, const size_t len
     array[index] += array[index - 1];
   }
 }
+
+template <typename T>
+__device__ __forceinline__ T ShuffleReduceMinWarp(T value, const data_size_t len) {
+  if (len > 0) {
+    const uint32_t mask = (0xffffffff >> (warpSize - len));
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+      const T other_value = __shfl_down_sync(mask, value, offset);
+      value = (other_value < value) ? other_value : value;
+    }
+  }
+  return value;
+}
+
+// reduce values from an 1-dimensional block (block size must be no greater than 1024)
+template <typename T>
+__device__ __forceinline__ T ShuffleReduceMin(T value, T* shared_mem_buffer, const size_t len) {
+  const uint32_t warpLane = threadIdx.x % warpSize;
+  const uint32_t warpID = threadIdx.x / warpSize;
+  const data_size_t warp_len = min(static_cast<data_size_t>(warpSize), static_cast<data_size_t>(len) - static_cast<data_size_t>(warpID * warpSize));
+  value = ShuffleReduceMinWarp<T>(value, warp_len);
+  if (warpLane == 0) {
+    shared_mem_buffer[warpID] = value;
+  }
+  __syncthreads();
+  const data_size_t num_warp = static_cast<data_size_t>((len + warpSize - 1) / warpSize);
+  if (warpID == 0) {
+    value = (warpLane < num_warp ? shared_mem_buffer[warpLane] : shared_mem_buffer[0]);
+    value = ShuffleReduceMinWarp<T>(value, num_warp);
+  }
+  return value;
+}
+
+template <typename VAL_T, typename REDUCE_T>
+void ShuffleReduceMinGlobal(const VAL_T* values, size_t n, REDUCE_T* block_buffer);
 
 template <typename VAL_T, typename INDEX_T, bool ASCENDING>
 __device__ __forceinline__ void BitonicArgSort_1024(const VAL_T* scores, INDEX_T* indices, const INDEX_T num_items) {
@@ -543,5 +577,5 @@ __device__ VAL_T PercentileDevice(const VAL_T* values,
 
 }  // namespace LightGBM
 
-#endif  // USE_CUDA_EXP
+#endif  // USE_CUDA
 #endif  // LIGHTGBM_CUDA_CUDA_ALGORITHMS_HPP_

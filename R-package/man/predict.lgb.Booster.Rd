@@ -28,7 +28,9 @@
 
                If single-row predictions are going to be performed frequently, it is recommended to
                pre-configure the model object for fast single-row sparse predictions through function
-               \link{lgb.configure_fast_predict}.}
+               \link{lgb.configure_fast_predict}.
+
+               \emph{Changed from 'data', in version 4.0.0}}
 
 \item{type}{Type of prediction to output. Allowed types are:\itemize{
             \item \code{"response"}: will output the predicted score according to the objective function being
@@ -49,7 +51,14 @@
             }
 
             Note that, if using custom objectives, types "class" and "response" will not be available and will
-            default towards using "raw" instead.}
+            default towards using "raw" instead.
+
+            If the model was fit through function \link{lightgbm} and it was passed a factor as labels,
+            passing the prediction type through \code{params} instead of through this argument might
+            result in factor levels for classification objectives not being applied correctly to the
+            resulting output.
+
+            \emph{New in version 4.0.0}}
 
 \item{start_iteration}{int or None, optional (default=None)
 Start index of the iteration to predict.
@@ -92,9 +101,17 @@ For prediction types that are meant to always return one output per observation 
         Shapley base value. For multiclass objectives, this matrix will represent \code{num_classes} such matrices,
         in the order "feature contributions for first class, feature contributions for second class, feature
         contributions for third class, etc.".
+
+        If the model was fit through function \link{lightgbm} and it was passed a factor as labels, predictions
+        returned from this function will retain the factor levels (either as values for \code{type="class"}, or
+        as column names for \code{type="response"} and \code{type="raw"} for multi-class objectives). Note that
+        passing the requested prediction type under \code{params} instead of through \code{type} might result in
+        the factor levels not being present in the output.
 }
 \description{
 Predicted values based on class \code{lgb.Booster}
+
+             \emph{New in version 4.0.0}
 }
 \details{
 If the model object has been configured for fast single-row predictions through
@@ -104,6 +121,8 @@ If the model object has been configured for fast single-row predictions through
 }
 \examples{
 \donttest{
+\dontshow{setLGBMthreads(2L)}
+\dontshow{data.table::setDTthreads(1L)}
 data(agaricus.train, package = "lightgbm")
 train <- agaricus.train
 dtrain <- lgb.Dataset(train$data, label = train$label)
@@ -115,6 +134,7 @@ params <- list(
   , metric = "l2"
   , min_data = 1L
   , learning_rate = 1.0
+  , num_threads = 2L
 )
 valids <- list(test = dtest)
 model <- lgb.train(

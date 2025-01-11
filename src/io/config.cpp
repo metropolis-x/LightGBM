@@ -40,9 +40,24 @@ void GetFirstValueAsInt(const std::unordered_map<std::string, std::vector<std::s
 }
 
 void Config::SetVerbosity(const std::unordered_map<std::string, std::vector<std::string>>& params) {
-  int verbosity = Config().verbosity;
-  GetFirstValueAsInt(params, "verbose", &verbosity);
-  GetFirstValueAsInt(params, "verbosity", &verbosity);
+  int verbosity = 1;
+
+  // if "verbosity" was found in params, prefer that to any other aliases
+  const auto verbosity_iter = params.find("verbosity");
+  if (verbosity_iter != params.end()) {
+    GetFirstValueAsInt(params, "verbosity", &verbosity);
+  } else {
+    // if "verbose" was found in params and "verbosity" was not, use that value
+    const auto verbose_iter = params.find("verbose");
+    if (verbose_iter != params.end()) {
+      GetFirstValueAsInt(params, "verbose", &verbosity);
+    } else {
+      // if "verbosity" and "verbose" were both missing from params, don't modify LightGBM's log level
+      return;
+    }
+  }
+
+  // otherwise, update LightGBM's log level based on the passed-in value
   if (verbosity < 0) {
     LightGBM::Log::ResetLogLevel(LightGBM::LogLevel::Fatal);
   } else if (verbosity == 0) {
@@ -95,6 +110,20 @@ void GetBoostingType(const std::unordered_map<std::string, std::string>& params,
       *boosting = "rf";
     } else {
       Log::Fatal("Unknown boosting type %s", value.c_str());
+    }
+  }
+}
+
+void GetDataSampleStrategy(const std::unordered_map<std::string, std::string>& params, std::string* strategy) {
+  std::string value;
+  if (Config::GetString(params, "data_sample_strategy", &value)) {
+    std::transform(value.begin(), value.end(), value.begin(), Common::tolower);
+    if (value == std::string("goss")) {
+      *strategy = "goss";
+    } else if (value == std::string("bagging")) {
+      *strategy = "bagging";
+    } else {
+      Log::Fatal("Unknown sample strategy %s", value.c_str());
     }
   }
 }
@@ -163,8 +192,6 @@ void GetDeviceType(const std::unordered_map<std::string, std::string>& params, s
       *device_type = "gpu";
     } else if (value == std::string("cuda")) {
       *device_type = "cuda";
-    } else if (value == std::string("cuda_exp")) {
-      *device_type = "cuda_exp";
     } else {
       Log::Fatal("Unknown device type %s", value.c_str());
     }
@@ -242,10 +269,11 @@ void Config::Set(const std::unordered_map<std::string, std::string>& params) {
 
   GetTaskType(params, &task);
   GetBoostingType(params, &boosting);
+  GetDataSampleStrategy(params, &data_sample_strategy);
   GetObjectiveType(params, &objective);
   GetMetricType(params, objective, &metric);
   GetDeviceType(params, &device_type);
-  if (device_type == std::string("cuda") || device_type == std::string("cuda_exp")) {
+  if (device_type == std::string("cuda")) {
     LGBM_config_::current_device = lgbm_device_cuda;
   }
   GetTreeLearnerType(params, &tree_learner);
@@ -276,14 +304,14 @@ void Config::Set(const std::unordered_map<std::string, std::string>& params) {
   }
 
   // check for conflicts
-  CheckParamConflict();
+  CheckParamConflict(params);
 }
 
 bool CheckMultiClassObjective(const std::string& objective) {
   return (objective == std::string("multiclass") || objective == std::string("multiclassova"));
 }
 
-void Config::CheckParamConflict() {
+void Config::CheckParamConflict(const std::unordered_map<std::string, std::string>& params) {
   // check if objective, metric, and num_class match
   int num_class_check = num_class;
   bool objective_type_multiclass = CheckMultiClassObjective(objective) || (objective == std::string("custom") && num_class_check > 1);
@@ -343,14 +371,24 @@ void Config::CheckParamConflict() {
                  tree_learner.c_str());
     }
   }
-  // Check max_depth and num_leaves
-  if (max_depth > 0) {
+
+  // max_depth defaults to -1, so max_depth>0 implies "you explicitly overrode the default"
+  //
+  // Changing max_depth while leaving num_leaves at its default (31) can lead to 2 undesirable situations:
+  //
+  //   * (0 <= max_depth <= 4) it's not possible to produce a tree with 31 leaves
+  //     - this block reduces num_leaves to 2^max_depth
+  //   * (max_depth > 4) 31 leaves is less than a full depth-wise tree, which might lead to underfitting
+  //     - this block warns about that
+  // ref: https://github.com/microsoft/LightGBM/issues/2898#issuecomment-1002860601
+  if (max_depth > 0 && (params.count("num_leaves") == 0 || params.at("num_leaves").empty())) {
     double full_num_leaves = std::pow(2, max_depth);
-    if (full_num_leaves > num_leaves
-        && num_leaves == kDefaultNumLeaves) {
-      Log::Warning("Accuracy may be bad since you didn't explicitly set num_leaves OR 2^max_depth > num_leaves."
-                   " (num_leaves=%d).",
-                   num_leaves);
+    if (full_num_leaves > num_leaves) {
+      Log::Warning("Provided parameters constrain tree depth (max_depth=%d) without explicitly setting 'num_leaves'. "
+                   "This can lead to underfitting. To resolve this warning, pass 'num_leaves' (<=%.0f) in params. "
+                   "Alternatively, pass (max_depth=-1) and just use 'num_leaves' to constrain model complexity.",
+                   max_depth,
+                   full_num_leaves);
     }
 
     if (full_num_leaves < num_leaves) {
@@ -358,31 +396,30 @@ void Config::CheckParamConflict() {
       num_leaves = static_cast<int>(full_num_leaves);
     }
   }
-  if (device_type == std::string("gpu") || device_type == std::string("cuda")) {
-    // force col-wise for gpu, and cuda version
+  if (device_type == std::string("gpu")) {
+    // force col-wise for gpu version
     force_col_wise = true;
     force_row_wise = false;
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
-  } else if (device_type == std::string("cuda_exp")) {
-    // force row-wise for cuda_exp version
+    if (use_quantized_grad) {
+      Log::Warning("Quantized training is not supported by GPU tree learner. Switch to full precision training.");
+      use_quantized_grad = false;
+    }
+  } else if (device_type == std::string("cuda")) {
+    // force row-wise for cuda version
     force_col_wise = false;
     force_row_wise = true;
     if (deterministic) {
       Log::Warning("Although \"deterministic\" is set, the results ran by GPU may be non-deterministic.");
     }
   }
-  // force gpu_use_dp for CUDA
-  if (device_type == std::string("cuda") && !gpu_use_dp) {
-    Log::Warning("CUDA currently requires double precision calculations.");
-    gpu_use_dp = true;
-  }
   // linear tree learner must be serial type and run on CPU device
   if (linear_tree) {
-    if (device_type != std::string("cpu")) {
+    if (device_type != std::string("cpu") && device_type != std::string("gpu")) {
       device_type = "cpu";
-      Log::Warning("Linear tree learner only works with CPU.");
+      Log::Warning("Linear tree learner only works with CPU and GPU. Falling back to CPU now.");
     }
     if (tree_learner != std::string("serial")) {
       tree_learner = "serial";
@@ -422,6 +459,17 @@ void Config::CheckParamConflict() {
         "Cannot set both min_data_in_leaf and min_sum_hessian_in_leaf to 0. "
         "Will set min_data_in_leaf to 1.");
     min_data_in_leaf = 1;
+  }
+  if (boosting == std::string("goss")) {
+    boosting = std::string("gbdt");
+    data_sample_strategy = std::string("goss");
+    Log::Warning("Found boosting=goss. For backwards compatibility reasons, LightGBM interprets this as boosting=gbdt, data_sample_strategy=goss."
+                 "To suppress this warning, set data_sample_strategy=goss instead.");
+  }
+
+  if (bagging_by_query && data_sample_strategy != std::string("bagging")) {
+    Log::Warning("bagging_by_query=true is only compatible with data_sample_strategy=bagging. Setting bagging_by_query=false.");
+    bagging_by_query = false;
   }
 }
 

@@ -11,6 +11,7 @@
 #include <LightGBM/cuda/vector_cudahost.h>
 #include <LightGBM/utils/json11.h>
 #include <LightGBM/utils/threading.h>
+#include <LightGBM/sample_strategy.h>
 
 #include <string>
 #include <algorithm>
@@ -28,7 +29,7 @@
 
 namespace LightGBM {
 
-using json11::Json;
+using json11_internal_lightgbm::Json;
 
 /*!
 * \brief GBDT algorithm implementation. including Training, prediction, bagging.
@@ -56,6 +57,11 @@ class GBDT : public GBDTBase {
   void Init(const Config* gbdt_config, const Dataset* train_data,
             const ObjectiveFunction* objective_function,
             const std::vector<const Metric*>& training_metrics) override;
+
+  /*!
+  * \brief Traverse the tree of forced splits and check that all indices are less than the number of features.
+  */
+  void CheckForcedSplitFeatures();
 
   /*!
   * \brief Merge model from other boosting object. Will insert to the front of current boosting object
@@ -137,7 +143,7 @@ class GBDT : public GBDTBase {
   */
   void Train(int snapshot_freq, const std::string& model_output_path) override;
 
-  void RefitTree(const std::vector<std::vector<int>>& tree_leaf_prediction) override;
+  void RefitTree(const int* tree_leaf_prediction, const size_t nrow, const size_t ncol) override;
 
   /*!
   * \brief Training logic
@@ -173,15 +179,20 @@ class GBDT : public GBDTBase {
       const auto pair = Common::Split(line.c_str(), ":");
       if (pair[1] == " ]")
         continue;
+      const auto param = pair[0].substr(1);
+      const auto value_str = pair[1].substr(1, pair[1].size() - 2);
+      auto iter = param_types.find(param);
+      if (iter == param_types.end()) {
+        Log::Warning("Ignoring unrecognized parameter '%s' found in model string.", param.c_str());
+        continue;
+      }
+      std::string param_type = iter->second;
       if (first) {
         first = false;
         str_buf << "\"";
       } else {
         str_buf << ",\"";
       }
-      const auto param = pair[0].substr(1);
-      const auto value_str = pair[1].substr(1, pair[1].size() - 2);
-      const auto param_type = param_types.at(param);
       str_buf << param << "\": ";
       if (param_type == "string") {
         str_buf << "\"" << value_str << "\"";
@@ -423,7 +434,7 @@ class GBDT : public GBDTBase {
     }
     start_iteration_for_pred_ = start_iteration;
     if (is_pred_contrib) {
-      #pragma omp parallel for schedule(static)
+      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
       for (int i = 0; i < static_cast<int>(models_.size()); ++i) {
         models_[i]->RecomputeMaxDepth();
       }
@@ -453,7 +464,7 @@ class GBDT : public GBDTBase {
 
  protected:
   virtual bool GetIsConstHessian(const ObjectiveFunction* objective_function) {
-    if (objective_function != nullptr) {
+    if (objective_function != nullptr && !data_sample_strategy_->IsHessianChange()) {
       return objective_function->IsConstantHessian();
     } else {
       return false;
@@ -468,18 +479,6 @@ class GBDT : public GBDTBase {
   * \brief reset config for bagging
   */
   void ResetBaggingConfig(const Config* config, bool is_change_dataset);
-
-  /*!
-  * \brief Implement bagging logic
-  * \param iter Current interation
-  */
-  virtual void Bagging(int iter);
-
-  virtual data_size_t BaggingHelper(data_size_t start, data_size_t cnt,
-                                    data_size_t* buffer);
-
-  data_size_t BalancedBaggingHelper(data_size_t start, data_size_t cnt,
-                                    data_size_t* buffer);
 
   /*!
   * \brief calculate the objective function
@@ -508,6 +507,11 @@ class GBDT : public GBDTBase {
 
   double BoostFromAverage(int class_id, bool update_scorer);
 
+  /*!
+  * \brief Reset gradient buffers, must be called after sample strategy is reset
+  */
+  void ResetGradientBuffers();
+
   /*! \brief current iteration */
   int iter_;
   /*! \brief Pointer to training data */
@@ -528,6 +532,8 @@ class GBDT : public GBDTBase {
   std::vector<std::vector<const Metric*>> valid_metrics_;
   /*! \brief Number of rounds for early stopping */
   int early_stopping_round_;
+  /*! \brief Minimum improvement for early stopping */
+  double early_stopping_min_delta_;
   /*! \brief Only use first metric for early stopping */
   bool es_first_metric_only_;
   /*! \brief Best iteration(s) for early stopping */
@@ -543,7 +549,7 @@ class GBDT : public GBDTBase {
   /*! \brief Parser config file content */
   std::string parser_config_str_ = "";
 
-#if defined(USE_CUDA) || defined(USE_CUDA_EXP)
+#ifdef USE_CUDA
   /*! \brief First order derivative of training data */
   std::vector<score_t, CHAllocator<score_t>> gradients_;
   /*! \brief Second order derivative of training data */
@@ -558,21 +564,19 @@ class GBDT : public GBDTBase {
   score_t* gradients_pointer_;
   /*! \brief Pointer to hessian vector, can be on CPU or GPU */
   score_t* hessians_pointer_;
-  /*! \brief Whether boosting is done on GPU, used for cuda_exp */
+  /*! \brief Whether boosting is done on GPU, used for device_type=cuda */
   bool boosting_on_gpu_;
-  #ifdef USE_CUDA_EXP
-  /*! \brief Buffer for scores when boosting is on GPU but evaluation is not, used only with cuda_exp */
+  #ifdef USE_CUDA
+  /*! \brief Gradient vector on GPU */
+  CUDAVector<score_t> cuda_gradients_;
+  /*! \brief Hessian vector on GPU */
+  CUDAVector<score_t> cuda_hessians_;
+  /*! \brief Buffer for scores when boosting is on GPU but evaluation is not, used only with device_type=cuda */
   mutable std::vector<double> host_score_;
-  /*! \brief Buffer for scores when boosting is not on GPU but evaluation is, used only with cuda_exp */
+  /*! \brief Buffer for scores when boosting is not on GPU but evaluation is, used only with device_type=cuda */
   mutable CUDAVector<double> cuda_score_;
-  /*! \brief Buffer for bag_data_indices_ on GPU, used only with cuda_exp */
-  CUDAVector<data_size_t> cuda_bag_data_indices_;
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 
-  /*! \brief Store the indices of in-bag data */
-  std::vector<data_size_t, Common::AlignmentAllocator<data_size_t, kAlignedSize>> bag_data_indices_;
-  /*! \brief Number of in-bag data */
-  data_size_t bag_data_cnt_;
   /*! \brief Number of training data */
   data_size_t num_data_;
   /*! \brief Number of trees per iterations */
@@ -592,8 +596,6 @@ class GBDT : public GBDTBase {
   /*! \brief Feature names */
   std::vector<std::string> feature_names_;
   std::vector<std::string> feature_infos_;
-  std::unique_ptr<Dataset> tmp_subset_;
-  bool is_use_subset_;
   std::vector<bool> class_need_train_;
   bool is_constant_hessian_;
   std::unique_ptr<ObjectiveFunction> loaded_objective_;
@@ -602,11 +604,9 @@ class GBDT : public GBDTBase {
   bool balanced_bagging_;
   std::string loaded_parameter_;
   std::vector<int8_t> monotone_constraints_;
-  const int bagging_rand_block_ = 1024;
-  std::vector<Random> bagging_rands_;
-  ParallelPartitionRunner<data_size_t, false> bagging_runner_;
   Json forced_splits_json_;
   bool linear_tree_;
+  std::unique_ptr<SampleStrategy> data_sample_strategy_;
 };
 
 }  // namespace LightGBM

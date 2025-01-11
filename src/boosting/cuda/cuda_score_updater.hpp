@@ -6,9 +6,9 @@
 #ifndef LIGHTGBM_BOOSTING_CUDA_CUDA_SCORE_UPDATER_HPP_
 #define LIGHTGBM_BOOSTING_CUDA_CUDA_SCORE_UPDATER_HPP_
 
-#ifdef USE_CUDA_EXP
+#ifdef USE_CUDA
 
-#include <LightGBM/cuda/cuda_utils.h>
+#include <LightGBM/cuda/cuda_utils.hu>
 
 #include "../score_updater.hpp"
 
@@ -60,6 +60,6 @@ class CUDAScoreUpdater: public ScoreUpdater {
 
 }  // namespace LightGBM
 
-#endif  // USE_CUDA_EXP
+#endif  // USE_CUDA
 
 #endif  // LIGHTGBM_BOOSTING_CUDA_CUDA_SCORE_UPDATER_HPP_

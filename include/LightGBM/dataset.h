@@ -5,14 +5,17 @@
 #ifndef LIGHTGBM_DATASET_H_
 #define LIGHTGBM_DATASET_H_
 
+#include <LightGBM/arrow.h>
 #include <LightGBM/config.h>
 #include <LightGBM/feature_group.h>
 #include <LightGBM/meta.h>
 #include <LightGBM/train_share_states.h>
+#include <LightGBM/utils/byte_buffer.h>
 #include <LightGBM/utils/openmp_wrapper.h>
 #include <LightGBM/utils/random.h>
 #include <LightGBM/utils/text_reader.h>
 
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <map>
@@ -108,23 +111,29 @@ class Metadata {
                         const std::vector<data_size_t>& used_data_indices);
 
   void SetLabel(const label_t* label, data_size_t len);
+  void SetLabel(const ArrowChunkedArray& array);
 
   void SetWeights(const label_t* weights, data_size_t len);
+  void SetWeights(const ArrowChunkedArray& array);
 
   void SetQuery(const data_size_t* query, data_size_t len);
+  void SetQuery(const ArrowChunkedArray& array);
+
+  void SetPosition(const data_size_t* position, data_size_t len);
 
   /*!
   * \brief Set initial scores
   * \param init_score Initial scores, this class will manage memory for init_score.
   */
   void SetInitScore(const double* init_score, data_size_t len);
+  void SetInitScore(const ArrowChunkedArray& array);
 
 
   /*!
   * \brief Save binary data to file
   * \param file File want to write
   */
-  void SaveBinaryToFile(const VirtualFileWriter* writer) const;
+  void SaveBinaryToFile(BinaryWriter* writer) const;
 
   /*!
   * \brief Get sizes in byte of this object
@@ -213,6 +222,38 @@ class Metadata {
   }
 
   /*!
+  * \brief Get positions, if does not exist then return nullptr
+  * \return Pointer of positions
+  */
+  inline const data_size_t* positions() const {
+    if (!positions_.empty()) {
+      return positions_.data();
+    } else {
+      return nullptr;
+    }
+  }
+
+  /*!
+  * \brief Get position IDs, if does not exist then return nullptr
+  * \return Pointer of position IDs
+  */
+  inline const std::string* position_ids() const {
+    if (!position_ids_.empty()) {
+      return position_ids_.data();
+    } else {
+      return nullptr;
+    }
+  }
+
+  /*!
+  * \brief Get Number of different position IDs
+  * \return number of different position IDs
+  */
+  inline size_t num_position_ids() const {
+      return position_ids_.size();
+  }
+
+  /*!
   * \brief Get data boundaries on queries, if not exists, will return nullptr
   *        we assume data will order by query,
   *        the interval of [query_boundaris[i], query_boundaris[i+1])
@@ -277,17 +318,19 @@ class Metadata {
   /*! \brief Disable copy */
   Metadata(const Metadata&) = delete;
 
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
 
   CUDAMetadata* cuda_metadata() const { return cuda_metadata_.get(); }
 
   void CreateCUDAMetadata(const int gpu_device_id);
 
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 
  private:
   /*! \brief Load wights from file */
   void LoadWeights();
+  /*! \brief Load positions from file */
+  void LoadPositions();
   /*! \brief Load query boundaries from file */
   void LoadQueryBoundaries();
   /*! \brief Calculate query weights from queries */
@@ -296,27 +339,45 @@ class Metadata {
   void CalculateQueryBoundaries();
   /*! \brief Insert labels at the given index */
   void InsertLabels(const label_t* labels, data_size_t start_index, data_size_t len);
+  /*! \brief Set labels from pointers to the first element and the end of an iterator. */
+  template <typename It>
+  void SetLabelsFromIterator(It first, It last);
   /*! \brief Insert weights at the given index */
   void InsertWeights(const label_t* weights, data_size_t start_index, data_size_t len);
+  /*! \brief Set weights from pointers to the first element and the end of an iterator. */
+  template <typename It>
+  void SetWeightsFromIterator(It first, It last);
   /*! \brief Insert initial scores at the given index */
   void InsertInitScores(const double* init_scores, data_size_t start_index, data_size_t len, data_size_t source_size);
+  /*! \brief Set init scores from pointers to the first element and the end of an iterator. */
+  template <typename It>
+  void SetInitScoresFromIterator(It first, It last);
   /*! \brief Insert queries at the given index */
   void InsertQueries(const data_size_t* queries, data_size_t start_index, data_size_t len);
+  /*! \brief Set queries from pointers to the first element and the end of an iterator. */
+  template <typename It>
+  void SetQueriesFromIterator(It first, It last);
   /*! \brief Filename of current data */
   std::string data_filename_;
   /*! \brief Number of data */
   data_size_t num_data_;
   /*! \brief Number of weights, used to check correct weight file */
   data_size_t num_weights_;
+  /*! \brief Number of positions, used to check correct position file */
+  data_size_t num_positions_;
   /*! \brief Label data */
   std::vector<label_t> label_;
   /*! \brief Weights data */
   std::vector<label_t> weights_;
+  /*! \brief Positions data */
+  std::vector<data_size_t> positions_;
+  /*! \brief Position identifiers */
+  std::vector<std::string> position_ids_;
   /*! \brief Query boundaries */
   std::vector<data_size_t> query_boundaries_;
   /*! \brief Query weights */
   std::vector<label_t> query_weights_;
-  /*! \brief Number of querys */
+  /*! \brief Number of queries */
   data_size_t num_queries_;
   /*! \brief Number of Initial score, used to check correct weight file */
   int64_t num_init_score_;
@@ -327,11 +388,12 @@ class Metadata {
   /*! \brief mutex for threading safe call */
   std::mutex mutex_;
   bool weight_load_from_file_;
+  bool position_load_from_file_;
   bool query_load_from_file_;
   bool init_score_load_from_file_;
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
   std::unique_ptr<CUDAMetadata> cuda_metadata_;
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 };
 
 
@@ -458,10 +520,18 @@ class Dataset {
                                      int32_t has_init_scores,
                                      int32_t has_queries,
                                      int32_t nclasses,
-                                     int32_t nthreads) {
+                                     int32_t nthreads,
+                                     int32_t omp_max_threads) {
+    // Initialize optional max thread count with either parameter or OMP setting
+    if (omp_max_threads > 0) {
+      omp_max_threads_ = omp_max_threads;
+    } else if (omp_max_threads_ <= 0) {
+      omp_max_threads_ = OMP_NUM_THREADS();
+    }
+
     metadata_.Init(num_data, has_weights, has_init_scores, has_queries, nclasses);
     for (int i = 0; i < num_groups_; ++i) {
-      feature_groups_[i]->InitStreaming(nthreads);
+      feature_groups_[i]->InitStreaming(nthreads, omp_max_threads_);
     }
   }
 
@@ -493,21 +563,26 @@ class Dataset {
     }
   }
 
-  inline void PushOneRow(int tid, data_size_t row_idx, const std::vector<double>& feature_values) {
-    if (is_finish_load_) { return; }
-    for (size_t i = 0; i < feature_values.size() && i < static_cast<size_t>(num_total_features_); ++i) {
-      int feature_idx = used_feature_map_[i];
-      if (feature_idx >= 0) {
-        const int group = feature2group_[feature_idx];
-        const int sub_feature = feature2subfeature_[feature_idx];
-        feature_groups_[group]->PushData(tid, sub_feature, row_idx, feature_values[i]);
-        if (has_raw_) {
-          int feat_ind = numeric_feature_map_[feature_idx];
-          if (feat_ind >= 0) {
-            raw_data_[feat_ind][row_idx] = static_cast<float>(feature_values[i]);
-          }
+  inline void PushOneValue(int tid, data_size_t row_idx, size_t col_idx, double value) {
+    if (this->is_finish_load_)
+      return;
+    auto feature_idx = this->used_feature_map_[col_idx];
+    if (feature_idx >= 0) {
+      auto group = this->feature2group_[feature_idx];
+      auto sub_feature = this->feature2subfeature_[feature_idx];
+      this->feature_groups_[group]->PushData(tid, sub_feature, row_idx, value);
+      if (this->has_raw_) {
+        auto feat_ind = numeric_feature_map_[feature_idx];
+        if (feat_ind >= 0) {
+          raw_data_[feat_ind][row_idx] = static_cast<float>(value);
         }
       }
+    }
+  }
+
+  inline void PushOneRow(int tid, data_size_t row_idx, const std::vector<double>& feature_values) {
+    for (size_t i = 0; i < feature_values.size() && i < static_cast<size_t>(num_total_features_); ++i) {
+      this->PushOneValue(tid, row_idx, i, feature_values[i]);
     }
   }
 
@@ -589,12 +664,15 @@ class Dataset {
 
   MultiValBin* GetMultiBinFromAllFeatures(const std::vector<uint32_t>& offsets) const;
 
+  template <bool USE_QUANT_GRAD, int HIST_BITS>
   TrainingShareStates* GetShareStates(
       score_t* gradients, score_t* hessians,
       const std::vector<int8_t>& is_feature_used, bool is_constant_hessian,
-      bool force_col_wise, bool force_row_wise) const;
+      bool force_col_wise, bool force_row_wise, const int num_grad_quant_bins) const;
 
   LIGHTGBM_EXPORT void FinishLoad();
+
+  bool SetFieldFromArrow(const char* field_name, const ArrowChunkedArray& ca);
 
   LIGHTGBM_EXPORT bool SetFloatField(const char* field_name, const float* field_data, data_size_t num_element);
 
@@ -613,6 +691,11 @@ class Dataset {
   */
   LIGHTGBM_EXPORT void SaveBinaryFile(const char* bin_filename);
 
+  /*!
+   * \brief Serialize the overall Dataset definition/schema to a binary buffer (i.e., without data)
+   */
+  LIGHTGBM_EXPORT void SerializeReference(ByteBuffer* out);
+
   LIGHTGBM_EXPORT void DumpTextFile(const char* text_filename);
 
   LIGHTGBM_EXPORT void CopyFeatureMapperFrom(const Dataset* dataset);
@@ -622,7 +705,7 @@ class Dataset {
   void InitTrain(const std::vector<int8_t>& is_feature_used,
                  TrainingShareStates* share_state) const;
 
-  template <bool USE_INDICES, bool USE_HESSIAN>
+  template <bool USE_INDICES, bool USE_HESSIAN, bool USE_QUANT_GRAD, int HIST_BITS>
   void ConstructHistogramsInner(const std::vector<int8_t>& is_feature_used,
                                 const data_size_t* data_indices,
                                 data_size_t num_data, const score_t* gradients,
@@ -632,7 +715,7 @@ class Dataset {
                                 TrainingShareStates* share_state,
                                 hist_t* hist_data) const;
 
-  template <bool USE_INDICES, bool ORDERED>
+  template <bool USE_INDICES, bool ORDERED, bool USE_QUANT_GRAD, int HIST_BITS>
   void ConstructHistogramsMultiVal(const data_size_t* data_indices,
                                    data_size_t num_data,
                                    const score_t* gradients,
@@ -640,6 +723,7 @@ class Dataset {
                                    TrainingShareStates* share_state,
                                    hist_t* hist_data) const;
 
+  template <bool USE_QUANT_GRAD, int HIST_BITS>
   inline void ConstructHistograms(
       const std::vector<int8_t>& is_feature_used,
       const data_size_t* data_indices, data_size_t num_data,
@@ -652,21 +736,21 @@ class Dataset {
     bool use_indices = data_indices != nullptr && (num_data < num_data_);
     if (share_state->is_constant_hessian) {
       if (use_indices) {
-        ConstructHistogramsInner<true, false>(
+        ConstructHistogramsInner<true, false, USE_QUANT_GRAD, HIST_BITS>(
             is_feature_used, data_indices, num_data, gradients, hessians,
             ordered_gradients, ordered_hessians, share_state, hist_data);
       } else {
-        ConstructHistogramsInner<false, false>(
+        ConstructHistogramsInner<false, false, USE_QUANT_GRAD, HIST_BITS>(
             is_feature_used, data_indices, num_data, gradients, hessians,
             ordered_gradients, ordered_hessians, share_state, hist_data);
       }
     } else {
       if (use_indices) {
-        ConstructHistogramsInner<true, true>(
+        ConstructHistogramsInner<true, true, USE_QUANT_GRAD, HIST_BITS>(
             is_feature_used, data_indices, num_data, gradients, hessians,
             ordered_gradients, ordered_hessians, share_state, hist_data);
       } else {
-        ConstructHistogramsInner<false, true>(
+        ConstructHistogramsInner<false, true, USE_QUANT_GRAD, HIST_BITS>(
             is_feature_used, data_indices, num_data, gradients, hessians,
             ordered_gradients, ordered_hessians, share_state, hist_data);
       }
@@ -674,6 +758,9 @@ class Dataset {
   }
 
   void FixHistogram(int feature_idx, double sum_gradient, double sum_hessian, hist_t* data) const;
+
+  template <typename PACKED_HIST_BIN_T, typename PACKED_HIST_ACC_T, int HIST_BITS_BIN, int HIST_BITS_ACC>
+  void FixHistogramInt(int feature_idx, int64_t sum_gradient_and_hessian, hist_t* data) const;
 
   inline data_size_t Split(int feature, const uint32_t* threshold,
                            int num_threshold, bool default_left,
@@ -846,6 +933,9 @@ class Dataset {
   /*! \brief Get whether FinishLoad is automatically called when pushing last row. */
   inline bool wait_for_manual_finish() const { return wait_for_manual_finish_; }
 
+  /*! \brief Get the maximum number of OpenMP threads to allocate for. */
+  inline int omp_max_threads() const { return omp_max_threads_; }
+
   /*! \brief Set whether the Dataset is finished automatically when last row is pushed or with a manual
    *         MarkFinished API call.  Set to true for thread-safe streaming and/or if will be coalesced later.
    *         FinishLoad should not be called on any Dataset that will be coalesced.
@@ -899,15 +989,19 @@ class Dataset {
     return feature_groups_[feature_group_index]->feature_min_bin(sub_feature_index);
   }
 
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
 
   const CUDAColumnData* cuda_column_data() const {
     return cuda_column_data_.get();
   }
 
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 
  private:
+  void SerializeHeader(BinaryWriter* serializer);
+
+  size_t GetSerializedHeaderSize();
+
   void CreateCUDAColumnData();
 
   std::string data_filename_;
@@ -927,8 +1021,11 @@ class Dataset {
   int label_idx_ = 0;
   /*! \brief store feature names */
   std::vector<std::string> feature_names_;
-  /*! \brief store feature names */
+  /*! \brief serialized versions */
+  static const int kSerializedReferenceVersionLength;
+  static const char* serialized_reference_version;
   static const char* binary_file_token;
+  static const char* binary_serialized_reference_token;
   int num_groups_;
   std::vector<int> real_feature_idx_;
   std::vector<int> feature2group_;
@@ -947,6 +1044,7 @@ class Dataset {
   std::vector<int> feature_need_push_zeros_;
   std::vector<std::vector<float>> raw_data_;
   bool wait_for_manual_finish_;
+  int omp_max_threads_ = -1;
   bool has_raw_;
   /*! map feature (inner index) to its index in the list of numeric (non-categorical) features */
   std::vector<int> numeric_feature_map_;
@@ -956,9 +1054,9 @@ class Dataset {
   /*! \brief mutex for threading safe call */
   std::mutex mutex_;
 
-  #ifdef USE_CUDA_EXP
+  #ifdef USE_CUDA
   std::unique_ptr<CUDAColumnData> cuda_column_data_;
-  #endif  // USE_CUDA_EXP
+  #endif  // USE_CUDA
 
   std::string parser_config_str_;
 };
